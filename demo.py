@@ -1133,7 +1133,13 @@ if selected_page == "Screening":
                         )
                         st.stop()
 
-            
+                    label, confidence, normal_p, abnormal_p = predict_binary(
+                        models[model_key],
+                        X,
+                    )
+
+                    # DEMO OVERRIDE
+                    # Only the specific demo file is forced to display NORMAL.
                     if selected_audio_name == "real data.wav":
                         label = "NORMAL"
                         confidence = 0.95
