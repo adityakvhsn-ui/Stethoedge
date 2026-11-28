@@ -1,5 +1,5 @@
 """
-StethoEdge - AI Heart & Lung Auscultation Screening
+StethoEdge - TensorFlow/Keras Audio Screening Demo
 
 Models:
     models/heart_normal_abnormal.keras
@@ -10,7 +10,7 @@ Models:
 Run:
     python -m streamlit run demo.py
 
-Research/hackathon prototype — not a clinical diagnostic tool.
+This is a hackathon/research prototype and is not a clinical diagnostic tool.
 """
 
 from pathlib import Path
@@ -18,7 +18,7 @@ import hashlib
 import html
 import os
 import tempfile
-from textwrap import dedent
+import textwrap
 from typing import Any
 
 import librosa
@@ -40,26 +40,20 @@ LUNG_MODEL_PATH = MODEL_DIR / "lung_normal_abnormal.keras"
 LUNG_TYPE_MODEL_PATH = MODEL_DIR / "lung_abnormal_type.keras"
 LUNG_LABELS_PATH = MODEL_DIR / "lung_abnormal_labels.npy"
 
-RECORDING_DURATION = 10
-MODEL_DURATION = 5
 SAMPLE_RATE = 16000
+RECORDING_DURATION = 10          # requested live recording target
+MODEL_DURATION = 5               # existing models were trained on 5-second windows
 MODEL_SAMPLES = SAMPLE_RATE * MODEL_DURATION
 
 N_MELS = 64
 N_FFT = 1024
 HOP_LENGTH = 512
 
-# Lenient minimum quality standards for real auscultation clips
-MIN_LIVE_DURATION_S = 5.0
-MIN_UPLOAD_DURATION_S = 3.0
-MIN_RMS = 0.002
-MIN_MODEL_WINDOW_RMS = 0.0015
-MIN_PEAK = 0.015
-MIN_STD = 0.001
-MAX_SILENCE_RATIO = 0.98
-MAX_CLIPPING_RATIO = 0.05
-MIN_QUALITY_SCORE = 50
-BORDERLINE_DIFF_THRESHOLD = 0.15
+# Optional About-page details. Fill these in before presenting the project.
+# Leave them blank to hide the Team section.
+TEAM_NAME = ""
+TEAM_MEMBERS: list[str] = []
+PROJECT_URL = ""
 
 MODEL_SPECS = [
     ("heart", "Heart Screening", HEART_MODEL_PATH, "keras"),
@@ -68,415 +62,247 @@ MODEL_SPECS = [
     ("lung_labels", "Lung Class Labels", LUNG_LABELS_PATH, "npy"),
 ]
 
-ORGAN_HISTORY_CONFIG = {
-    "Heart": {
-        "conditions": [
-            "Coronary artery disease / prior MI",
-            "Heart murmur / valve disease",
-            "Arrhythmia (e.g., AFib)",
-            "Heart failure / cardiomyopathy",
-            "Hypertension / high cholesterol",
-            "Family history of early heart disease",
-        ],
-        "symptoms": [
-            "Chest pain or pressure",
-            "Palpitations",
-            "Exertional shortness of breath",
-            "Dizziness or leg swelling",
-        ],
-        "red_flags": [
-            "Severe chest pain (arm/jaw radiation)",
-            "Fainting / syncope",
-            "Rest dyspnea",
-        ],
-        "exposures": ["Current smoker", "Former smoker"],
-    },
-    "Lungs": {
-        "conditions": [
-            "Asthma",
-            "COPD / chronic bronchitis",
-            "Prior pneumonia or TB",
-            "Interstitial lung disease",
-            "Prior pulmonary embolism",
-        ],
-        "symptoms": [
-            "Persistent cough",
-            "Wheezing",
-            "Shortness of breath",
-            "Sputum or fever",
-        ],
-        "red_flags": [
-            "Severe respiratory distress",
-            "Coughing up blood",
-            "Cyanosis (blue lips/nails)",
-        ],
-        "exposures": ["Current smoker / vaper", "Dust or fume exposure"],
-    },
-}
+
+def html_block(markup: str) -> None:
+    """Render an HTML fragment after removing indentation that can create code blocks."""
+    st.markdown(textwrap.dedent(markup).strip(), unsafe_allow_html=True)
+
+
+def segmented_choice(label: str, options: list[str], default: str, key: str) -> str:
+    """Use Streamlit's segmented buttons, with a radio fallback for older versions."""
+    if hasattr(st, "segmented_control"):
+        selected = st.segmented_control(
+            label,
+            options,
+            default=default,
+            key=key,
+            label_visibility="collapsed",
+        )
+        return selected or default
+    return st.radio(
+        label,
+        options,
+        index=options.index(default),
+        horizontal=True,
+        key=key,
+        label_visibility="collapsed",
+    )
 
 
 # ============================================================
-# PAGE CONFIG & MINIMALIST STYLING
+# PAGE & STYLING
 # ============================================================
 
 st.set_page_config(
     page_title="StethoEdge",
     page_icon="🩺",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
 )
 
-st.markdown(
-    dedent(
-        """
-        <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap');
+html_block(
+    """
+    <style>
+    .block-container {
+        padding-top: 2rem;
+        padding-bottom: 2.5rem;
+        max-width: 1250px;
+    }
 
-        html, body, [class*="css"] {
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-        }
+    .hero-card {
+        padding: 1.5rem 1.75rem;
+        border-radius: 16px;
+        background: linear-gradient(135deg, rgba(14, 165, 233, 0.12), rgba(16, 185, 129, 0.08));
+        border: 1px solid rgba(56, 189, 248, 0.25);
+        margin-bottom: 1.25rem;
+    }
 
-        [data-testid="stAppViewContainer"] {
-            background:
-                radial-gradient(850px 320px at 10% -8%, rgba(14, 165, 233, 0.09), transparent 60%),
-                radial-gradient(750px 300px at 90% -5%, rgba(16, 185, 129, 0.07), transparent 55%),
-                #090d16;
-        }
+    .hero-badge {
+        display: inline-block;
+        padding: 0.22rem 0.65rem;
+        border-radius: 999px;
+        font-size: 0.72rem;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: #38bdf8;
+        background: rgba(56, 189, 248, 0.14);
+        border: 1px solid rgba(56, 189, 248, 0.3);
+        margin-bottom: 0.55rem;
+    }
 
-        [data-testid="stHeader"] { background: transparent; }
-        [data-testid="stDeployButton"], .stDeployButton, .stAppDeployButton, #MainMenu, footer {
-            display: none !important;
-        }
+    .hero-title {
+        font-size: 2.25rem;
+        font-weight: 800;
+        line-height: 1.15;
+        margin: 0;
+    }
 
-        .block-container {
-            padding-top: 1.2rem;
-            padding-bottom: 2rem;
-            max-width: 1180px;
-        }
+    .hero-subtitle {
+        opacity: 0.8;
+        font-size: 1rem;
+        margin-top: 0.35rem;
+        margin-bottom: 0;
+    }
 
-        /* Minimal Header */
-        .nav-bar {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding-bottom: 1rem;
-            margin-bottom: 1.2rem;
-            border-bottom: 1px solid rgba(148, 163, 184, 0.12);
-        }
+    .disclaimer-bar {
+        padding: 0.75rem 1rem;
+        border-radius: 10px;
+        background: rgba(245, 158, 11, 0.12);
+        border: 1px solid rgba(245, 158, 11, 0.35);
+        font-size: 0.88rem;
+        margin-bottom: 1.5rem;
+    }
 
-        .nav-brand {
-            display: flex;
-            align-items: center;
-            gap: 0.75rem;
-        }
+    .section-label {
+        font-size: 0.78rem;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        opacity: 0.65;
+        margin-bottom: 0.35rem;
+    }
 
-        .nav-logo {
-            width: 38px;
-            height: 38px;
-            border-radius: 10px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            background: rgba(56, 189, 248, 0.12);
-            border: 1px solid rgba(56, 189, 248, 0.28);
-        }
+    .status-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 0.55rem 0.75rem;
+        border-radius: 10px;
+        background: rgba(148, 163, 184, 0.08);
+        border: 1px solid rgba(148, 163, 184, 0.16);
+        margin-bottom: 0.45rem;
+        font-size: 0.88rem;
+    }
 
-        .nav-title {
-            font-size: 1.35rem;
-            font-weight: 800;
-            letter-spacing: -0.02em;
-            color: #f8fafc;
-            margin: 0;
-            line-height: 1.1;
-        }
+    .pill-ok {
+        font-size: 0.74rem;
+        font-weight: 700;
+        color: #22c55e;
+        background: rgba(34, 197, 94, 0.14);
+        border: 1px solid rgba(34, 197, 94, 0.35);
+        padding: 0.12rem 0.5rem;
+        border-radius: 999px;
+    }
 
-        .nav-sub {
-            font-size: 0.8rem;
-            color: #64748b;
-            margin: 0.1rem 0 0 0;
-        }
+    .pill-err {
+        font-size: 0.74rem;
+        font-weight: 700;
+        color: #ef4444;
+        background: rgba(239, 68, 68, 0.14);
+        border: 1px solid rgba(239, 68, 68, 0.35);
+        padding: 0.12rem 0.5rem;
+        border-radius: 999px;
+    }
 
-        .nav-tag {
-            font-size: 0.72rem;
-            font-weight: 600;
-            color: #94a3b8;
-            background: rgba(148, 163, 184, 0.08);
-            border: 1px solid rgba(148, 163, 184, 0.16);
-            padding: 0.3rem 0.7rem;
-            border-radius: 999px;
-        }
+    .result-card {
+        padding: 1.5rem;
+        border-radius: 16px;
+        text-align: center;
+        margin-bottom: 1rem;
+    }
 
-        /* Segmented Pills */
-        div[role="radiogroup"] {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 0.45rem;
-        }
+    .result-normal {
+        background: rgba(34, 197, 94, 0.12);
+        border: 1.5px solid rgba(34, 197, 94, 0.55);
+    }
 
-        div[role="radiogroup"] > label {
-            justify-content: center;
-            padding: 0.52rem 0.65rem !important;
-            border-radius: 9px !important;
-            border: 1px solid rgba(148, 163, 184, 0.16) !important;
-            background: rgba(255, 255, 255, 0.02) !important;
-            margin-right: 0 !important;
-            font-size: 0.88rem !important;
-            font-weight: 600 !important;
-            transition: all 0.15s ease;
-        }
+    .result-abnormal {
+        background: rgba(239, 68, 68, 0.12);
+        border: 1.5px solid rgba(239, 68, 68, 0.55);
+    }
 
-        div[role="radiogroup"] > label:hover {
-            border-color: rgba(56, 189, 248, 0.45) !important;
-        }
+    .result-kicker {
+        font-size: 0.78rem;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        opacity: 0.75;
+    }
 
-        div[role="radiogroup"] > label:has(input:checked) {
-            border-color: #38bdf8 !important;
-            background: rgba(56, 189, 248, 0.14) !important;
-            color: #f8fafc !important;
-        }
+    .result-title {
+        font-size: 2.1rem;
+        font-weight: 800;
+        letter-spacing: 0.03em;
+        margin: 0.2rem 0;
+    }
 
-        div[role="radiogroup"] > label > div:first-of-type {
-            display: none !important;
-        }
+    .result-normal .result-title {
+        color: #22c55e;
+    }
 
-        .field-lbl {
-            font-size: 0.72rem;
-            font-weight: 700;
-            letter-spacing: 0.08em;
-            text-transform: uppercase;
-            color: #64748b;
-            margin-bottom: 0.35rem;
-        }
+    .result-abnormal .result-title {
+        color: #ef4444;
+    }
 
-        /* Primary CTA */
-        div.stButton > button[kind="primary"],
-        div[data-testid="stFormSubmitButton"] > button {
-            border-radius: 10px !important;
-            padding: 0.58rem 1rem !important;
-            font-weight: 700 !important;
-            background: linear-gradient(135deg, #38bdf8, #34d399) !important;
-            border: none !important;
-            color: #04101a !important;
-        }
+    .result-confidence {
+        font-size: 1rem;
+        font-weight: 600;
+        opacity: 0.9;
+    }
 
-        div.stButton > button[kind="primary"]:hover,
-        div[data-testid="stFormSubmitButton"] > button:hover {
-            filter: brightness(1.07);
-        }
+    .quality-pass {
+        padding: 0.8rem 1rem;
+        border-radius: 10px;
+        background: rgba(34, 197, 94, 0.10);
+        border: 1px solid rgba(34, 197, 94, 0.35);
+    }
 
-        /* Verdict Hero */
-        .verdict-box {
-            padding: 1.3rem 1.4rem;
-            border-radius: 14px;
-            background: rgba(15, 23, 42, 0.6);
-            border: 1px solid rgba(148, 163, 184, 0.14);
-            margin-bottom: 0.85rem;
-        }
+    .quality-fail {
+        padding: 0.8rem 1rem;
+        border-radius: 10px;
+        background: rgba(239, 68, 68, 0.10);
+        border: 1px solid rgba(239, 68, 68, 0.35);
+    }
 
-        .verdict-row {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            flex-wrap: wrap;
-            gap: 0.75rem;
-        }
+    .recommendation {
+        padding: 1rem 1.1rem;
+        border-radius: 12px;
+        background: rgba(59, 130, 246, 0.09);
+        border: 1px solid rgba(59, 130, 246, 0.30);
+    }
 
-        .verdict-word {
-            font-size: 2.1rem;
-            font-weight: 800;
-            letter-spacing: -0.01em;
-            line-height: 1.05;
-        }
+    .placeholder-card {
+        padding: 2.5rem 1.75rem;
+        border-radius: 16px;
+        border: 1px dashed rgba(148, 163, 184, 0.35);
+        background: rgba(148, 163, 184, 0.04);
+        text-align: center;
+    }
 
-        .v-norm { color: #34d399; }
-        .v-abn { color: #f87171; }
-
-        .verdict-meta {
-            font-size: 0.8rem;
-            color: #94a3b8;
-            margin-top: 0.3rem;
-        }
-
-        .conf-badge {
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 0.85rem;
-            font-weight: 700;
-            padding: 0.35rem 0.8rem;
-            border-radius: 999px;
-            background: rgba(255, 255, 255, 0.05);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            color: #f8fafc;
-        }
-
-        .prob-bar-wrap {
-            margin-top: 0.95rem;
-        }
-
-        .prob-labels {
-            display: flex;
-            justify-content: space-between;
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 0.76rem;
-            color: #94a3b8;
-            margin-bottom: 0.32rem;
-        }
-
-        .split-track {
-            display: flex;
-            width: 100%;
-            height: 8px;
-            border-radius: 999px;
-            overflow: hidden;
-            background: rgba(148, 163, 184, 0.14);
-        }
-
-        .split-norm { background: #34d399; height: 100%; }
-        .split-abn { background: #f87171; height: 100%; }
-
-        .borderline-pill {
-            display: inline-block;
-            margin-top: 0.75rem;
-            font-size: 0.76rem;
-            color: #fbbf24;
-            background: rgba(245, 158, 11, 0.1);
-            border: 1px solid rgba(245, 158, 11, 0.28);
-            padding: 0.25rem 0.6rem;
-            border-radius: 7px;
-        }
-
-        /* Compact Clinical KPI Strip */
-        .kpi-row {
-            display: grid;
-            grid-template-columns: repeat(3, 1fr);
-            gap: 0.65rem;
-            margin-bottom: 0.85rem;
-        }
-
-        .kpi-tile {
-            padding: 0.75rem 0.9rem;
-            border-radius: 11px;
-            background: rgba(15, 23, 42, 0.55);
-            border: 1px solid rgba(148, 163, 184, 0.13);
-        }
-
-        .kpi-k {
-            font-size: 0.68rem;
-            font-weight: 700;
-            letter-spacing: 0.07em;
-            text-transform: uppercase;
-            color: #64748b;
-        }
-
-        .kpi-v {
-            font-size: 0.96rem;
-            font-weight: 700;
-            color: #f1f5f9;
-            margin-top: 0.2rem;
-        }
-
-        /* Compact 2-Card Bedside Guide */
-        .cue-grid {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 0.75rem;
-        }
-
-        .cue-card {
-            padding: 0.9rem 1rem;
-            border-radius: 12px;
-            background: rgba(15, 23, 42, 0.55);
-            border: 1px solid rgba(148, 163, 184, 0.13);
-        }
-
-        .cue-head {
-            font-size: 0.72rem;
-            font-weight: 700;
-            letter-spacing: 0.07em;
-            text-transform: uppercase;
-            color: #38bdf8;
-            margin-bottom: 0.45rem;
-        }
-
-        .cue-list {
-            margin: 0;
-            padding-left: 1rem;
-            color: #cbd5e1;
-            font-size: 0.84rem;
-            line-height: 1.55;
-        }
-
-        /* Subtype Bars */
-        .sub-row { margin-bottom: 0.5rem; }
-        .sub-meta {
-            display: flex;
-            justify-content: space-between;
-            font-size: 0.82rem;
-            font-weight: 600;
-            color: #e2e8f0;
-            margin-bottom: 0.2rem;
-        }
-        .sub-track {
-            width: 100%;
-            height: 6px;
-            border-radius: 999px;
-            background: rgba(148, 163, 184, 0.14);
-            overflow: hidden;
-        }
-        .sub-fill {
-            height: 100%;
-            border-radius: 999px;
-            background: linear-gradient(90deg, #38bdf8, #34d399);
-        }
-
-        /* Empty & Alert Cards */
-        .calm-empty {
-            padding: 3.4rem 1.5rem;
-            border-radius: 14px;
-            border: 1px dashed rgba(148, 163, 184, 0.22);
-            background: rgba(15, 23, 42, 0.28);
-            text-align: center;
-            color: #94a3b8;
-        }
-
-        .q-fail {
-            padding: 0.85rem 1rem;
-            border-radius: 11px;
-            background: rgba(239, 68, 68, 0.10);
-            border: 1px solid rgba(239, 68, 68, 0.35);
-            margin-bottom: 0.75rem;
-            font-size: 0.9rem;
-        }
-
-        .rec-pill {
-            padding: 0.85rem 1rem;
-            border-radius: 11px;
-            background: rgba(56, 189, 248, 0.09);
-            border: 1px solid rgba(56, 189, 248, 0.28);
-            margin-top: 0.75rem;
-            font-size: 0.88rem;
-            color: #e2e8f0;
-        }
-
-        .status-row {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 0.45rem 0.65rem;
-            border-radius: 8px;
-            background: rgba(148, 163, 184, 0.07);
-            margin-bottom: 0.35rem;
-            font-size: 0.82rem;
-        }
-        .dot-ok { color: #34d399; font-weight: 700; font-size: 0.72rem; }
-        .dot-err { color: #f87171; font-weight: 700; font-size: 0.72rem; }
-
-        @media (max-width: 768px) {
-            .kpi-row, .cue-grid { grid-template-columns: 1fr; }
-        }
-        </style>
-        """
-    ).strip(),
-    unsafe_allow_html=True,
+    .tips-card {
+        margin-top: 1rem;
+        padding: 1rem 1.1rem;
+        border-radius: 12px;
+        background: rgba(56, 189, 248, 0.07);
+        border: 1px solid rgba(56, 189, 248, 0.22);
+        font-size: 0.9rem;
+    }
+    .tips-card ul { margin: 0.5rem 0 0 1.1rem; padding: 0; }
+    .tips-card li { margin: 0.25rem 0; }
+    .landing-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 0.65rem;
+        margin: 1.4rem 0;
+        text-align: left;
+    }
+    .landing-grid div {
+        padding: 0.85rem;
+        border-radius: 10px;
+        background: rgba(56, 189, 248, 0.08);
+        border: 1px solid rgba(56, 189, 248, 0.18);
+        font-size: 0.88rem;
+    }
+    .landing-grid strong { color: #38bdf8; font-size: 1.1rem; }
+    .landing-note { opacity: 0.75; font-size: 0.9rem; }
+    @media (max-width: 760px) {
+        .block-container { padding-left: 1rem; padding-right: 1rem; }
+        .hero-title { font-size: 1.8rem; }
+        .landing-grid { grid-template-columns: 1fr; }
+    }
+    </style>
+    """
 )
 
 
@@ -485,43 +311,81 @@ st.markdown(
 # ============================================================
 
 @st.cache_resource
-def load_models() -> dict[str, Any]:
-    """Load available Keras models and label arrays."""
+def load_models() -> tuple[dict[str, Any], dict[str, str]]:
+    """Load each available model independently; report failures without crashing the app."""
     loaded: dict[str, Any] = {}
-    for key, _, path, kind in MODEL_SPECS:
-        if not path.exists():
+    errors: dict[str, str] = {}
+
+    for key, display_name, model_path, kind in MODEL_SPECS:
+        if not model_path.exists():
+            errors[key] = f"Missing file: {model_path.name}"
             continue
-        if kind == "keras":
-            loaded[key] = tf.keras.models.load_model(path)
-        elif kind == "npy":
-            loaded[key] = np.load(path)
-    return loaded
+
+        try:
+            if kind == "keras":
+                loaded[key] = tf.keras.models.load_model(model_path)
+            elif kind == "npy":
+                loaded[key] = np.load(model_path, allow_pickle=False)
+        except Exception as exc:
+            errors[key] = f"Could not load {display_name}: {type(exc).__name__}: {exc}"
+
+    return loaded, errors
 
 
-models = load_models()
+models, model_load_errors = load_models()
+
+
+def render_model_registry() -> None:
+    """Show model availability and any loading errors."""
+    for key, display_name, model_path, _kind in MODEL_SPECS:
+        if key in models:
+            status = "Loaded"
+            css_class = "pill-ok"
+        elif key in model_load_errors and model_path.exists():
+            status = "Failed"
+            css_class = "pill-err"
+        else:
+            status = "Missing"
+            css_class = "pill-err"
+
+        html_block(
+            f"""
+            <div class="status-row">
+                <span>{html.escape(display_name)}</span>
+                <span class="{css_class}">{status}</span>
+            </div>
+            """
+        )
+        if key in model_load_errors:
+            st.caption(model_load_errors[key])
+
 
 
 # ============================================================
-# AUDIO, QUALITY & CLINICAL FEATURES
+# AUDIO HELPERS
 # ============================================================
 
 def load_audio_bytes(audio_bytes: bytes, suffix: str = ".wav") -> tuple[np.ndarray, float]:
-    """Decode audio bytes into 16 kHz mono float32 and duration."""
+    """Decode recorded/uploaded audio at 16 kHz mono."""
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp.write(audio_bytes)
         tmp_path = tmp.name
 
     try:
-        audio, _ = librosa.load(tmp_path, sr=SAMPLE_RATE, mono=True)
+        audio, sr = librosa.load(tmp_path, sr=SAMPLE_RATE, mono=True)
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
 
-    return audio.astype(np.float32), len(audio) / SAMPLE_RATE
+    duration = len(audio) / SAMPLE_RATE
+    return audio.astype(np.float32), duration
 
 
 def build_model_input(audio: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Prepare 5-second audio window and 64-band log-Mel spectrogram tensor."""
+    """
+    Keep the existing model interface:
+    first 5 seconds -> 64-bin log-Mel spectrogram -> [1, mel, time, 1].
+    """
     if len(audio) < MODEL_SAMPLES:
         model_audio = np.pad(audio, (0, MODEL_SAMPLES - len(audio)))
     else:
@@ -534,93 +398,95 @@ def build_model_input(audio: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.nda
         n_fft=N_FFT,
         hop_length=HOP_LENGTH,
     )
+
     mel_db = librosa.power_to_db(mel, ref=np.max)
     X = mel_db.astype(np.float32)[np.newaxis, ..., np.newaxis]
+
     return model_audio, mel_db, X
 
 
-def assess_audio_quality(
-    audio: np.ndarray,
-    duration: float,
-    input_mode: str,
-) -> dict[str, Any]:
-    """Enforce lenient minimum acoustic quality before inference."""
+def assess_audio_quality(audio: np.ndarray, duration: float) -> dict[str, Any]:
+    """
+    Technical recording-quality gate.
+    This is not a medical-quality assessment.
+    """
     if len(audio) == 0:
         return {
             "acceptable": False,
             "score": 0,
-            "duration": 0.0,
-            "reasons": ["No audio signal captured."],
+            "reasons": ["No audio signal was captured."],
         }
 
-    min_duration = MIN_LIVE_DURATION_S if input_mode == "Live Recording" else MIN_UPLOAD_DURATION_S
     rms = float(np.sqrt(np.mean(np.square(audio)) + 1e-12))
-    model_rms = float(np.sqrt(np.mean(np.square(audio[:MODEL_SAMPLES])) + 1e-12))
     peak = float(np.max(np.abs(audio)))
-    std_dev = float(np.std(audio))
     clipping_ratio = float(np.mean(np.abs(audio) >= 0.99))
-    silence_ratio = float(np.mean(np.abs(audio) < max(0.002, peak * 0.03)))
+
+    threshold = max(0.005, peak * 0.05)
+    silence_ratio = float(np.mean(np.abs(audio) < threshold))
 
     reasons: list[str] = []
     score = 100
 
-    if duration < min_duration:
-        reasons.append(f"Clip too short ({duration:.1f}s < {min_duration:.0f}s minimum).")
-        score -= 40
-    if rms < MIN_RMS:
-        reasons.append("Signal level is too faint.")
+    if duration < 8:
+        reasons.append("Recording is shorter than 8 seconds.")
         score -= 35
-    if model_rms < MIN_MODEL_WINDOW_RMS:
-        reasons.append("First 5 seconds contain almost no signal.")
-        score -= 30
-    if peak < MIN_PEAK or std_dev < MIN_STD:
-        reasons.append("Dead or flat microphone input.")
+    elif duration < 9.5:
+        score -= 10
+
+    if rms < 0.003:
+        reasons.append("Signal level is too weak.")
+        score -= 35
+
+    if peak < 0.03:
+        reasons.append("Peak amplitude is too low.")
+        score -= 15
+
+    if silence_ratio > 0.97:
+        reasons.append("Too much silence was detected.")
         score -= 25
-    if silence_ratio > MAX_SILENCE_RATIO:
-        reasons.append("Audio is nearly 100% silent.")
-        score -= 30
-    if clipping_ratio > MAX_CLIPPING_RATIO:
-        reasons.append(f"Heavy distortion ({clipping_ratio * 100:.1f}% clipped).")
-        score -= 30
+
+    if clipping_ratio > 0.02:
+        reasons.append("The recording contains excessive clipping/distortion.")
+        score -= 20
 
     score = max(0, min(100, score))
+
+    # A technical gate should be conservative without being unnecessarily strict.
+    acceptable = (
+        duration >= 8
+        and rms >= 0.003
+        and peak >= 0.03
+        and silence_ratio <= 0.97
+        and clipping_ratio <= 0.02
+    )
+
+    if acceptable and not reasons:
+        reasons.append("Signal level, duration, silence, and clipping checks passed.")
+
     return {
-        "acceptable": len(reasons) == 0 and score >= MIN_QUALITY_SCORE,
+        "acceptable": acceptable,
         "score": score,
-        "duration": duration,
+        "rms": rms,
+        "peak": peak,
+        "silence_ratio": silence_ratio,
+        "clipping_ratio": clipping_ratio,
         "reasons": reasons,
     }
 
 
-def compute_clinical_profile(model_audio: np.ndarray) -> dict[str, Any]:
-    """Compute dominant pitch and Bell vs. Diaphragm stethoscope guidance."""
-    if len(model_audio) == 0:
-        return {"dom_hz": 0.0, "side": "Bell / Diaphragm", "band_note": "—"}
-
-    spectrum = np.abs(np.fft.rfft(model_audio * np.hanning(len(model_audio)))) ** 2
-    freqs = np.fft.rfftfreq(len(model_audio), d=1.0 / SAMPLE_RATE)
-    mask = (freqs >= 20) & (freqs <= 2000)
-    total = float(np.sum(spectrum[mask])) + 1e-12
-
-    low_pct = (float(np.sum(spectrum[(freqs >= 20) & (freqs < 200)])) / total) * 100.0
-    sub_freqs = freqs[mask]
-    sub_spec = spectrum[mask]
-    dom_hz = float(sub_freqs[int(np.argmax(sub_spec))]) if len(sub_spec) > 0 else 0.0
-
-    is_low = dom_hz < 200 or low_pct >= 65.0
-    side = "Bell (20–200 Hz)" if is_low else "Diaphragm (200–2k Hz)"
-    band_note = f"{low_pct:.0f}% low-freq" if is_low else f"{100 - low_pct:.0f}% mid/high-freq"
-    return {"dom_hz": dom_hz, "side": side, "band_note": band_note}
-
-
 # ============================================================
-# INFERENCE
+# INFERENCE HELPERS
 # ============================================================
 
-def predict_binary(model: Any, X: np.ndarray) -> tuple[str, float, float, float]:
+def predict_binary(
+    model: Any,
+    X: np.ndarray,
+) -> tuple[str, float, float, float]:
     """Run binary normal/abnormal classification."""
     prediction = np.asarray(model.predict(X, verbose=0)[0]).reshape(-1)
+
     if prediction.size < 2:
+        # Supports a sigmoid-style one-output model as well.
         abnormal_prob = float(prediction[0])
         normal_prob = 1.0 - abnormal_prob
     else:
@@ -629,443 +495,994 @@ def predict_binary(model: Any, X: np.ndarray) -> tuple[str, float, float, float]
 
     if abnormal_prob >= normal_prob:
         return "ABNORMAL", abnormal_prob, normal_prob, abnormal_prob
+
     return "NORMAL", normal_prob, normal_prob, abnormal_prob
 
 
-def predict_lung_type(X: np.ndarray) -> tuple[str, float, np.ndarray]:
+def predict_lung_type(
+    X: np.ndarray,
+) -> tuple[str, float, np.ndarray]:
     """Classify abnormal lung sound subtype."""
     prediction = np.asarray(models["lung_type"].predict(X, verbose=0)[0]).reshape(-1)
     labels = models["lung_labels"]
-    idx = int(np.argmax(prediction))
-    return str(labels[idx]), float(prediction[idx]), prediction
+
+    index = int(np.argmax(prediction))
+    return str(labels[index]), float(prediction[index]), prediction
 
 
-def format_label(raw: str) -> str:
-    return str(raw).replace("_", " ").title()
-
-
-def clamp_prob(val: float) -> float:
-    return min(max(float(val), 0.0), 1.0)
+def format_label(raw_label: str) -> str:
+    """Format snake_case class labels for display."""
+    return str(raw_label).replace("_", " ").title()
 
 
 # ============================================================
-# PLOTS (CLEAN & MINIMAL)
+# VISUALIZATION HELPERS
 # ============================================================
 
-def render_spectrogram_figure(model_audio: np.ndarray) -> plt.Figure:
-    """Clean 20–2000 Hz clinical frequency map."""
-    stft_mag = np.abs(librosa.stft(model_audio, n_fft=2048, hop_length=256))
-    freqs = librosa.fft_frequencies(sr=SAMPLE_RATE, n_fft=2048)
-    mask = (freqs >= 20) & (freqs <= 2000)
-    spec_db = librosa.amplitude_to_db(stft_mag[mask, :], ref=np.max)
-
-    fig, ax = plt.subplots(figsize=(6.8, 3.0), dpi=140)
-    fig.patch.set_facecolor("#090d16")
-    ax.set_facecolor("#090d16")
+def render_spectrogram_figure(mel_db: np.ndarray) -> plt.Figure:
+    """Create a dark-canvas Mel spectrogram figure."""
+    fig, ax = plt.subplots(figsize=(8.5, 3.4), dpi=140)
+    fig.patch.set_facecolor("#0f172a")
+    ax.set_facecolor("#0f172a")
 
     img = ax.imshow(
-        spec_db,
+        mel_db,
         origin="lower",
         aspect="auto",
         cmap="magma",
-        extent=[0, MODEL_DURATION, 20, 2000],
+        extent=[0, MODEL_DURATION, 0, N_MELS],
     )
-    ax.axhline(200, color="#38bdf8", linestyle="--", linewidth=0.8, alpha=0.65)
-    ax.axhline(600, color="#34d399", linestyle="--", linewidth=0.8, alpha=0.65)
-    ax.set_title("Frequency Map (20–2000 Hz)", color="#e2e8f0", fontsize=10, pad=8)
-    ax.set_xlabel("Time (s)", color="#94a3b8", fontsize=8.5)
-    ax.set_ylabel("Hz", color="#94a3b8", fontsize=8.5)
-    ax.tick_params(colors="#64748b", labelsize=8)
+
+    ax.set_title(
+        "Log-Mel Spectrogram (5.0s Model Window)",
+        color="#f1f5f9",
+        fontsize=11,
+        pad=10,
+    )
+    ax.set_xlabel("Time (s)", color="#cbd5e1", fontsize=9.5)
+    ax.set_ylabel("Mel Band", color="#cbd5e1", fontsize=9.5)
+    ax.tick_params(colors="#94a3b8", labelsize=8.5)
+
     for spine in ax.spines.values():
-        spine.set_edgecolor("#1e293b")
+        spine.set_edgecolor("#334155")
 
     cbar = fig.colorbar(img, ax=ax, format="%+2.0f dB")
-    cbar.ax.tick_params(colors="#64748b", labelsize=7.5)
-    cbar.outline.set_edgecolor("#1e293b")
+    cbar.ax.tick_params(colors="#94a3b8", labelsize=8)
+    cbar.outline.set_edgecolor("#334155")
+
     fig.tight_layout()
     return fig
 
 
 def render_waveform_figure(audio: np.ndarray) -> plt.Figure:
-    """Clean waveform + amplitude envelope."""
-    fig, ax = plt.subplots(figsize=(6.8, 3.0), dpi=140)
-    fig.patch.set_facecolor("#090d16")
-    ax.set_facecolor("#090d16")
+    """Create a dark-canvas audio waveform figure."""
+    fig, ax = plt.subplots(figsize=(8.5, 3.0), dpi=140)
+    fig.patch.set_facecolor("#0f172a")
+    ax.set_facecolor("#0f172a")
 
-    dur = len(audio) / SAMPLE_RATE
-    t = np.linspace(0, dur, num=len(audio))
-    ax.plot(t, audio, color="#38bdf8", linewidth=0.65, alpha=0.85)
-    ax.fill_between(t, audio, 0, color="#38bdf8", alpha=0.14)
+    time_axis = np.linspace(0, len(audio) / SAMPLE_RATE, num=len(audio))
+    ax.plot(time_axis, audio, color="#38bdf8", linewidth=0.75, alpha=0.9)
+    ax.axhline(0, color="#334155", linewidth=0.8, linestyle="--")
 
-    env = librosa.feature.rms(y=audio, frame_length=1024, hop_length=256)[0]
-    ax.plot(np.linspace(0, dur, num=len(env)), env * 2.1, color="#fbbf24", linewidth=1.1)
+    ax.set_title(
+        "Recorded Audio Waveform (16 kHz)",
+        color="#f1f5f9",
+        fontsize=11,
+        pad=10,
+    )
+    ax.set_xlabel("Time (s)", color="#cbd5e1", fontsize=9.5)
+    ax.set_ylabel("Amplitude", color="#cbd5e1", fontsize=9.5)
+    ax.set_xlim(0, max(RECORDING_DURATION, len(audio) / SAMPLE_RATE))
+    ax.tick_params(colors="#94a3b8", labelsize=8.5)
 
-    ax.set_title("Cadence & Envelope", color="#e2e8f0", fontsize=10, pad=8)
-    ax.set_xlabel("Time (s)", color="#94a3b8", fontsize=8.5)
-    ax.set_xlim(0, max(MODEL_DURATION, dur))
-    ax.tick_params(colors="#64748b", labelsize=8)
     for spine in ax.spines.values():
-        spine.set_edgecolor("#1e293b")
+        spine.set_edgecolor("#334155")
 
     fig.tight_layout()
     return fig
 
 
-# ============================================================
-# UI SECTIONS
-# ============================================================
+def render_screening_result(
+    organ_name: str,
+    label: str,
+    confidence: float,
+    normal_p: float,
+    abnormal_p: float,
+) -> None:
+    """Render the main normal/abnormal verdict card and probability metrics."""
+    css_class = "result-normal" if label == "NORMAL" else "result-abnormal"
 
-def render_verdict_card(analysis: dict[str, Any]) -> None:
-    """Render clean single-box verdict + split probability bar."""
-    organ = analysis["screening_type"]
-    label = analysis["label"]
-    norm_pct = clamp_prob(analysis["normal_p"]) * 100
-    abn_pct = clamp_prob(analysis["abnormal_p"]) * 100
-    conf_pct = clamp_prob(analysis["confidence"]) * 100
-    diff = abs(norm_pct - abn_pct)
-
-    word_cls = "v-norm" if label == "NORMAL" else "v-abn"
-    clip_label = html.escape(analysis["clip_name"])
-    q_score = analysis["quality"]["score"]
-    dur = analysis["quality"]["duration"]
-
-    borderline = (
-        f'<div class="borderline-pill">Borderline margin ({diff:.1f} pts) — verify clinically</div>'
-        if diff < BORDERLINE_DIFF_THRESHOLD * 100
-        else ""
+    html_block(
+        f"""
+        <div class="result-card {css_class}">
+            <div class="result-kicker">{html.escape(organ_name)} Screening Result</div>
+            <div class="result-title">✓ Prediction: {html.escape(label)}</div>
+            <div class="result-confidence">Model output: {confidence * 100:.0f}%</div>
+        </div>
+        """
     )
 
-    st.markdown(
-        dedent(
-            f"""
-            <div class="verdict-box">
-            <div class="verdict-row">
-            <div>
-            <div class="verdict-word {word_cls}">{html.escape(label)}</div>
-            <div class="verdict-meta">{html.escape(organ)} • {clip_label} • {dur:.1f}s • Quality {q_score}/100</div>
-            </div>
-            <div class="conf-badge">{conf_pct:.1f}% Confidence</div>
-            </div>
-            <div class="prob-bar-wrap">
-            <div class="prob-labels"><span>Normal {norm_pct:.1f}%</span><span>Abnormal {abn_pct:.1f}%</span></div>
-            <div class="split-track">
-            <div class="split-norm" style="width:{norm_pct:.1f}%;"></div>
-            <div class="split-abn" style="width:{abn_pct:.1f}%;"></div>
-            </div>
-            </div>
-            {borderline}
-            </div>
-            """
-        ).strip(),
-        unsafe_allow_html=True,
+    col1, col2 = st.columns(2)
+    col1.metric("Normal Probability", f"{normal_p * 100:.1f}%")
+    col2.metric("Abnormal Probability", f"{abnormal_p * 100:.1f}%")
+
+
+# ============================================================
+# ORGAN-SPECIFIC HISTORY / NEXT-STEP GUIDANCE
+# ============================================================
+
+def render_patient_history_and_recommendation(
+    organ: str,
+    normal_p: float,
+    abnormal_p: float,
+) -> None:
+    """Collect organ-specific context when model probabilities are close.
+
+    The score is a transparent prototype rule, not a validated clinical risk
+    score or a probability of disease. Urgent symptoms always override it.
+    """
+    probability_gap = abs(normal_p - abnormal_p) * 100.0
+
+    if probability_gap > 10.0:
+        return
+
+    is_heart = organ.lower() == "heart"
+    organ_label = "Heart" if is_heart else "Lung"
+
+    st.markdown("---")
+    st.markdown(f"### {organ_label} History & Consultation Guidance")
+    st.caption(
+        f"The model probabilities are close (difference: {probability_gap:.1f} "
+        "percentage points). Please answer the relevant questions. The score "
+        "helps organise the history; it does not diagnose a condition."
     )
 
-    if organ == "Lungs" and label == "ABNORMAL" and analysis["lung_type"] is not None:
-        with st.container(border=True):
-            st.markdown('<div class="field-lbl">Detected Lung Sound Pattern</div>', unsafe_allow_html=True)
-            ranked = sorted(
-                zip(models["lung_labels"], analysis["lung_type_probs"]),
-                key=lambda item: float(item[1]),
-                reverse=True,
-            )
-            bars = []
-            for name, prob in ranked:
-                pct = clamp_prob(prob) * 100
-                bars.append(
-                    f'<div class="sub-row">'
-                    f'<div class="sub-meta"><span>{html.escape(format_label(name))}</span><span>{pct:.1f}%</span></div>'
-                    f'<div class="sub-track"><div class="sub-fill" style="width:{pct:.1f}%;"></div></div>'
-                    f'</div>'
-                )
-            st.markdown("".join(bars), unsafe_allow_html=True)
-
-
-def render_trainee_guide(analysis: dict[str, Any]) -> None:
-    """Render concise, high-signal bedside cues for a young doctor."""
-    organ = analysis["screening_type"]
-    label = analysis["label"]
-    lung_type = format_label(analysis["lung_type"]).lower() if analysis.get("lung_type") else ""
-    prof = compute_clinical_profile(analysis["model_audio"])
-
-    if organ == "Heart":
-        exam_focus = "APETM • Pulse Sync"
-        bedside_cues = [
-            "<li>Palpate carotid pulse to separate systole vs. diastole</li>",
-            "<li>Apex (5th L ICS) with Bell; Base (2nd R/L ICS) with Diaphragm</li>",
-            "<li>Check radiation to carotids or axilla</li>",
-        ]
-        watch_out = (
-            [
-                "<li>Normal clip doesn't exclude subtle diastolic murmurs</li>",
-                "<li>Try left lateral decubitus (MS/S3) &amp; lean forward (AR)</li>",
-                "<li>Always correlate with vitals &amp; history below</li>",
-            ]
-            if label == "NORMAL"
-            else [
-                "<li>Rule out fever, anemia, or tachycardia flow murmurs</li>",
-                "<li>Eliminate chest-hair rub or clothing friction</li>",
-                "<li>Confirm timing clinically; order echo if persistent</li>",
-            ]
+    with st.form(f"patient_history_{organ.lower()}_form"):
+        age = st.number_input(
+            "Age",
+            min_value=1,
+            max_value=120,
+            value=25,
+            step=1,
+            key=f"{organ.lower()}_history_age",
         )
-    else:
-        exam_focus = "Symmetric Ladder"
-        if label == "NORMAL":
-            bedside_cues = [
-                "<li>Compare Left vs. Right at each level (anterior &amp; posterior)</li>",
-                "<li>Ask for deep, open-mouth breaths</li>",
-                "<li>Percuss bases if patient is dyspneic or febrile</li>",
-            ]
-            watch_out = [
-                "<li>Single 5s spot can miss focal early pneumonia</li>",
-                "<li>Check SpO₂, respiratory rate, and tactile fremitus</li>",
-                "<li>Review lung history &amp; exposures below</li>",
-            ]
-        elif "wheez" in lung_type and "crackl" not in lung_type:
-            bedside_cues = [
-                "<li>Continuous musical sound (400–1600 Hz) from narrowed airways</li>",
-                "<li>Note expiratory vs. inspiratory phase &amp; polyphonic vs. focal</li>",
-                "<li>Check SpO₂ &amp; work of breathing immediately</li>",
-            ]
-            watch_out = [
-                "<li>Consider asthma, COPD flare, or focal obstruction</li>",
-                "<li>Severe obstruction can produce a 'silent chest'</li>",
-                "<li>Re-assess air entry after bronchodilator</li>",
-            ]
-        else:
-            bedside_cues = [
-                "<li>Fine late crackles = edema/fibrosis; coarse = secretions</li>",
-                "<li>Ask patient to cough &amp; re-listen to see if sounds clear</li>",
-                "<li>Compare symmetric zones top-to-bottom</li>",
-            ]
-            watch_out = [
-                "<li>Rule out chest-hair friction or tubing noise</li>",
-                "<li>Correlate with fever, SpO₂, and percussion dullness</li>",
-                "<li>Consider chest imaging if focal signs persist</li>",
-            ]
 
-    st.markdown(
-        dedent(
-            f"""
-            <div class="kpi-row">
-            <div class="kpi-tile"><div class="kpi-k">Use Stethoscope</div><div class="kpi-v">{html.escape(prof["side"])}</div></div>
-            <div class="kpi-tile"><div class="kpi-k">Dominant Pitch</div><div class="kpi-v">{prof["dom_hz"]:.0f} Hz ({html.escape(prof["band_note"])})</div></div>
-            <div class="kpi-tile"><div class="kpi-k">Bedside Focus</div><div class="kpi-v">{html.escape(exam_focus)}</div></div>
-            </div>
-            <div class="cue-grid">
-            <div class="cue-card"><div class="cue-head">Bedside Action</div><ul class="cue-list">{"".join(bedside_cues)}</ul></div>
-            <div class="cue-card"><div class="cue-head">Clinical Watch-Out</div><ul class="cue-list">{"".join(watch_out)}</ul></div>
-            </div>
-            """
-        ).strip(),
-        unsafe_allow_html=True,
+        if is_heart:
+            st.markdown("#### Previous heart history")
+            history = st.multiselect(
+                "Have you ever been diagnosed with any of these?",
+                [
+                    "Coronary artery disease / angina",
+                    "Previous heart attack or heart procedure",
+                    "Heart failure",
+                    "Irregular heartbeat / arrhythmia",
+                    "High blood pressure",
+                    "Diabetes",
+                    "High cholesterol",
+                    "Previous stroke / TIA",
+                ],
+                key="heart_history_conditions",
+            )
+            family_history = st.checkbox(
+                "A parent or sibling had heart disease at a relatively young age",
+                key="heart_family_history",
+            )
+            tobacco = st.radio(
+                "Smoking / tobacco history",
+                ["Never", "Current", "Former"],
+                horizontal=True,
+                key="heart_tobacco_history",
+            )
+
+            st.markdown("#### Current heart-related symptoms")
+            symptoms = st.multiselect(
+                "Are you currently experiencing any of these?",
+                [
+                    "Chest discomfort or pressure (not severe or ongoing)",
+                    "Shortness of breath during activity",
+                    "Palpitations / racing heartbeat",
+                    "Dizziness or light-headedness",
+                    "Unexplained swelling of the ankles or legs",
+                    "Unusual fatigue",
+                ],
+                key="heart_history_symptoms",
+            )
+            urgent = st.multiselect(
+                "Urgent warning symptoms — select any that apply",
+                [
+                    "Severe, persistent, or new chest pain/pressure now",
+                    "Severe shortness of breath at rest",
+                    "Fainting or near-fainting now",
+                    "Sudden face drooping, arm weakness, or trouble speaking",
+                ],
+                help="These symptoms need urgent medical assessment regardless of the model result or score.",
+                key="heart_history_urgent",
+            )
+
+            history_points = {
+                "Coronary artery disease / angina": 20,
+                "Previous heart attack or heart procedure": 22,
+                "Heart failure": 25,
+                "Irregular heartbeat / arrhythmia": 12,
+                "High blood pressure": 8,
+                "Diabetes": 8,
+                "High cholesterol": 6,
+                "Previous stroke / TIA": 10,
+            }
+            symptom_points = {
+                "Chest discomfort or pressure (not severe or ongoing)": 18,
+                "Shortness of breath during activity": 15,
+                "Palpitations / racing heartbeat": 10,
+                "Dizziness or light-headedness": 8,
+                "Unexplained swelling of the ankles or legs": 12,
+                "Unusual fatigue": 6,
+            }
+            score_raw = sum(history_points[x] for x in history)
+            score_raw += sum(symptom_points[x] for x in symptoms)
+            score_raw += 8 if family_history else 0
+            score_raw += {"Never": 0, "Current": 10, "Former": 5}[tobacco]
+
+        else:
+            st.markdown("#### Previous lung / respiratory history")
+            history = st.multiselect(
+                "Have you ever been diagnosed with any of these?",
+                [
+                    "Asthma",
+                    "COPD / emphysema",
+                    "Bronchiectasis",
+                    "Interstitial lung disease / pulmonary fibrosis",
+                    "Previous tuberculosis (TB)",
+                    "Repeated pneumonia or serious chest infections",
+                ],
+                key="lung_history_conditions",
+            )
+            exposures = st.multiselect(
+                "Smoking and environmental exposure history",
+                [
+                    "Current cigarette / bidi smoking",
+                    "Former cigarette / bidi smoking",
+                    "Vaping",
+                    "Regular second-hand smoke exposure",
+                    "Work-related dust, fumes, or chemicals",
+                    "Regular indoor biomass / wood / cooking smoke",
+                ],
+                key="lung_history_exposures",
+            )
+
+            st.markdown("#### Current respiratory symptoms")
+            symptoms = st.multiselect(
+                "Are you currently experiencing any of these?",
+                [
+                    "Persistent cough (around 3 weeks or more)",
+                    "Cough with sputum / phlegm",
+                    "Wheezing",
+                    "Shortness of breath while walking or being active",
+                    "Repeated chest infections",
+                    "Fever with a current respiratory illness",
+                    "Chest tightness or discomfort",
+                ],
+                key="lung_history_symptoms",
+            )
+            urgent = st.multiselect(
+                "Urgent warning symptoms — select any that apply",
+                [
+                    "Severe difficulty breathing at rest",
+                    "Blue or grey lips / face",
+                    "Coughing up blood",
+                    "New confusion or fainting with breathing symptoms",
+                    "Chest pain together with breathing difficulty",
+                ],
+                help="These symptoms need urgent medical assessment regardless of the model result or score.",
+                key="lung_history_urgent",
+            )
+
+            history_points = {
+                "Asthma": 12,
+                "COPD / emphysema": 22,
+                "Bronchiectasis": 20,
+                "Interstitial lung disease / pulmonary fibrosis": 22,
+                "Previous tuberculosis (TB)": 15,
+                "Repeated pneumonia or serious chest infections": 10,
+            }
+            exposure_points = {
+                "Current cigarette / bidi smoking": 12,
+                "Former cigarette / bidi smoking": 6,
+                "Vaping": 10,
+                "Regular second-hand smoke exposure": 5,
+                "Work-related dust, fumes, or chemicals": 8,
+                "Regular indoor biomass / wood / cooking smoke": 8,
+            }
+            symptom_points = {
+                "Persistent cough (around 3 weeks or more)": 15,
+                "Cough with sputum / phlegm": 8,
+                "Wheezing": 12,
+                "Shortness of breath while walking or being active": 15,
+                "Repeated chest infections": 10,
+                "Fever with a current respiratory illness": 5,
+                "Chest tightness or discomfort": 8,
+            }
+            score_raw = sum(history_points[x] for x in history)
+            score_raw += sum(exposure_points[x] for x in exposures)
+            score_raw += sum(symptom_points[x] for x in symptoms)
+
+        submitted = st.form_submit_button(
+            "Calculate History Score",
+            type="primary",
+            use_container_width=True,
+        )
+
+    result_key = (
+        f"{organ.lower()}_history_result_"
+        f"{st.session_state.get('active_audio_identity', 'current')}"
     )
 
-    if label == "NORMAL":
-        cfg = ORGAN_HISTORY_CONFIG[organ]
-        st.markdown("---")
-        st.markdown(f'<div class="field-lbl">{organ} Medical History Check (Normal Screen)</div>', unsafe_allow_html=True)
-        with st.form(f"history_{organ.lower()}"):
-            c1, c2 = st.columns(2, gap="medium")
-            with c1:
-                age = st.number_input("Age", min_value=0, max_value=120, value=25, step=1)
-                conditions = st.multiselect(f"Prior {organ.lower()} history", cfg["conditions"])
-                exposures = st.multiselect("Exposure", cfg["exposures"])
-            with c2:
-                symptoms = st.multiselect("Current symptoms", cfg["symptoms"])
-                red_flags = st.multiselect("Red flags", cfg["red_flags"])
+    if submitted:
+        score = min(100, int(score_raw))
 
-            submitted = st.form_submit_button("Check Next Step", type="primary", use_container_width=True)
+        if urgent:
+            result_level = "URGENT MEDICAL ASSESSMENT"
+            result_message = (
+                "You selected a warning symptom. Do not rely on the AI result "
+                "or this score. Seek urgent medical care now. For severe "
+                "breathing difficulty, ongoing severe chest pain, blue/grey "
+                "lips, fainting, or stroke-like symptoms, contact local "
+                "emergency services."
+            )
+        elif score >= 60:
+            result_level = "PROMPT DOCTOR REVIEW RECOMMENDED"
+            result_message = (
+                "The history answers include several factors that should be "
+                "reviewed by a qualified clinician. Arrange a medical "
+                "assessment promptly; do not use the AI result to delay care."
+            )
+        elif score >= 40:
+            result_level = "DOCTOR CONSULTATION RECOMMENDED"
+            result_message = (
+                "Arrange a clinical appointment to discuss the symptoms and "
+                "medical history, especially if they are persistent or worsening."
+            )
+        elif score >= 20:
+            result_level = "MILD / NON-URGENT CONSULTATION TO CONSIDER"
+            result_message = (
+                "Discuss the history with a healthcare professional if symptoms "
+                "persist, recur, or affect daily activities."
+            )
+        else:
+            result_level = "LOWER HISTORY CONTEXT SCORE"
+            result_message = (
+                "This does not rule out a medical condition. Follow routine "
+                "care and seek medical advice if symptoms develop, persist, "
+                "or worsen."
+            )
 
-        if submitted:
-            if red_flags:
-                msg = f"URGENT EVALUATION — {organ} red-flag symptoms override a normal AI clip."
-            elif symptoms or conditions or exposures:
-                msg = f"CLINICAL REVIEW — Discuss {organ.lower()} history, symptoms, or exposures with a senior clinician."
-            else:
-                msg = f"ROUTINE CARE — No {organ.lower()} risk factors reported (age {age})."
-            st.markdown(f'<div class="rec-pill">{html.escape(msg)}</div>', unsafe_allow_html=True)
+        st.session_state[result_key] = {
+            "score": score,
+            "age": age,
+            "urgent": bool(urgent),
+            "level": result_level,
+            "message": result_message,
+        }
+
+    result = st.session_state.get(result_key)
+    if not result:
+        return
+
+    st.markdown("#### History context score")
+    st.metric("Context score (not a disease probability)", f"{result['score']}/100")
+    st.progress(result["score"])
+
+    if result["urgent"]:
+        st.error(f"{result['level']}: {result['message']}")
+        st.caption("Urgent symptoms override the numerical score.")
+    elif result["score"] >= 60:
+        st.error(f"{result['level']}. {result['message']}")
+    elif result["score"] >= 40:
+        st.warning(f"{result['level']}. {result['message']}")
+    elif result["score"] >= 20:
+        st.info(f"{result['level']}. {result['message']}")
+    else:
+        st.success(f"{result['level']}. {result['message']}")
+
+    st.caption(
+        f"Age recorded: {result['age']}. This is an experimental, rule-based "
+        "score created for the prototype; it is not clinically validated and "
+        "must not be interpreted as a diagnosis or a probability of disease. "
+        "The audio model and questionnaire can both be wrong."
+    )
 
 
 # ============================================================
-# SESSION STATE
-# ============================================================
-
-for k in ("analysis", "audio_id", "last_organ", "last_mode"):
-    if k not in st.session_state:
-        st.session_state[k] = None
-
-
-# ============================================================
-# SIDEBAR (COLLAPSED BY DEFAULT FOR CLEAN PRESENTATION)
+# NAVIGATION
 # ============================================================
 
 with st.sidebar:
-    st.markdown("### Models")
-    for key, name, _, _ in MODEL_SPECS:
-        ok = key in models
-        cls = "dot-ok" if ok else "dot-err"
-        txt = "Ready" if ok else "Missing"
-        st.markdown(f'<div class="status-row"><span>{html.escape(name)}</span><span class="{cls}">{txt}</span></div>', unsafe_allow_html=True)
-
+    st.markdown("## 🩺 StethoEdge")
+    st.caption("Cardiopulmonary audio screening prototype")
+    selected_page = st.radio(
+        "Navigation",
+        ["Screening", "How to use", "About"],
+        index=0,
+        key="app_navigation",
+    )
     st.markdown("---")
-    st.caption(
-        f"Window: {MODEL_DURATION}s @ {SAMPLE_RATE // 1000} kHz • "
-        f"Quality min: {MIN_QUALITY_SCORE}/100 • TF {tf.__version__}"
+    st.caption("Research prototype • Not clinically validated")
+
+
+if selected_page == "Screening":
+    # ============================================================
+    # HEADER
+    # ============================================================
+
+    html_block(
+        """
+        <div class="hero-card">
+            <div class="hero-badge">Research & Hackathon Prototype</div>
+            <h1 class="hero-title">🩺 StethoEdge</h1>
+            <p class="hero-subtitle">
+                AI-assisted heart and lung auscultation screening powered by Mel-spectrogram CNNs
+            </p>
+        </div>
+
+        <div class="disclaimer-bar">
+            <strong>Notice:</strong> Results are generated by an experimental deep-learning
+            prototype and are <strong>not a clinical diagnosis or medical clearance</strong>.
+        </div>
+        """,
     )
 
 
-# ============================================================
-# HEADER
-# ============================================================
+    # ============================================================
+    # MAIN WORKSPACE
+    # ============================================================
 
-st.markdown(
-    dedent(
-        """
-        <div class="nav-bar">
-        <div class="nav-brand">
-        <div class="nav-logo">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M2 12h3l2.5-6 3.5 12 3-8 2 2h6"/>
-        </svg>
-        </div>
-        <div>
-        <h1 class="nav-title">StethoEdge</h1>
-        <p class="nav-sub">AI-assisted cardiac &amp; pulmonary auscultation</p>
-        </div>
-        </div>
-        <div class="nav-tag">Prototype • Not for clinical diagnosis</div>
-        </div>
-        """
-    ).strip(),
-    unsafe_allow_html=True,
-)
+    left_col, right_col = st.columns([1, 1.35], gap="large")
 
+    with left_col:
+        with st.container(border=True):
+            html_block('<div class="section-label">Step 1 • Modality</div>')
 
-# ============================================================
-# MAIN STAGE
-# ============================================================
+            screening_choice = segmented_choice(
+                "Select auscultation target",
+                ["❤️ Heart", "🫁 Lungs"],
+                default="❤️ Heart",
+                key="screening_modality",
+            )
+            screening_type = "Heart" if "Heart" in screening_choice else "Lungs"
 
-left_col, right_col = st.columns([0.92, 1.55], gap="large")
+            st.markdown("---")
+            html_block('<div class="section-label">Step 2 • Audio Input</div>')
 
-with left_col:
-    with st.container(border=True):
-        st.markdown('<div class="field-lbl">Organ</div>', unsafe_allow_html=True)
-        organ_choice = st.radio("Organ", ["❤️ Heart", "🫁 Lungs"], horizontal=True, label_visibility="collapsed")
-        organ = "Heart" if "Heart" in organ_choice else "Lungs"
-        if st.session_state.last_organ != organ:
-            st.session_state.last_organ = organ
-            st.session_state.analysis = None
+            audio_source = segmented_choice(
+                "Choose how to provide audio",
+                ["Live recording", "Upload audio file"],
+                default="Live recording",
+                key="audio_source_mode",
+            )
 
-        st.markdown('<div class="field-lbl" style="margin-top:0.75rem;">Audio Input</div>', unsafe_allow_html=True)
-        mode_choice = st.radio("Mode", ["🎙️ Live", "📁 Upload"], horizontal=True, label_visibility="collapsed")
-        input_mode = "Live Recording" if "Live" in mode_choice else "Upload File"
-        if st.session_state.last_mode != input_mode:
-            st.session_state.last_mode = input_mode
-            st.session_state.audio_id = None
-            st.session_state.analysis = None
-
-        audio_bytes: bytes | None = None
-        audio_suffix = ".wav"
-        clip_name = input_mode
-
-        if input_mode == "Live Recording":
-            try:
-                rec = st.audio_input("Record 5–10s", sample_rate=SAMPLE_RATE)
-            except TypeError:
-                rec = st.audio_input("Record 5–10s")
-            if rec is not None:
-                audio_bytes = rec.getvalue()
-                clip_name = "Live Mic"
-                st.audio(rec)
-        else:
-            up = st.file_uploader("Upload WAV/MP3/FLAC/OGG", type=["wav", "mp3", "flac", "ogg"], label_visibility="collapsed")
-            if up is not None:
-                audio_bytes = up.getvalue()
-                audio_suffix = Path(up.name).suffix.lower() or ".wav"
-                clip_name = up.name
-                st.audio(up)
-
-        if audio_bytes is not None:
-            cid = hashlib.sha256(audio_bytes).hexdigest()
-            if st.session_state.audio_id != cid:
-                st.session_state.audio_id = cid
-                st.session_state.analysis = None
-            run_clicked = st.button("Run Screening", type="primary", use_container_width=True)
-        else:
-            st.session_state.audio_id = None
-            st.session_state.analysis = None
+            selected_audio_bytes = None
+            selected_audio_name = "recording.wav"
             run_clicked = False
 
-with right_col:
-    q_fail: dict[str, Any] | None = None
+            if audio_source == "Live recording":
+                st.markdown(
+                    f"**LIVE AUSCULTATION**  \n"
+                    f"Recording target: **{RECORDING_DURATION} seconds**  \n"
+                    f"Type: **{screening_type}**"
+                )
 
-    if run_clicked and audio_bytes is not None:
-        try:
-            with st.spinner("Screening audio..."):
-                audio, duration = load_audio_bytes(audio_bytes, suffix=audio_suffix)
-                quality = assess_audio_quality(audio, duration, input_mode)
+                recorded_audio = st.audio_input(
+                    "Start live recording",
+                    sample_rate=SAMPLE_RATE,
+                    key="live_audio_input",
+                )
 
-                if not quality["acceptable"]:
+                if recorded_audio is not None:
+                    selected_audio_bytes = recorded_audio.getvalue()
+                    selected_audio_name = "recording.wav"
+                    st.audio(selected_audio_bytes, format="audio/wav")
+                    run_clicked = st.button(
+                        "Analyze Auscultation",
+                        type="primary",
+                        use_container_width=True,
+                        key="analyze_live_audio",
+                    )
+
+                st.caption(
+                    "Record close to the stethoscope/microphone. The technical quality "
+                    "check runs before inference. The models analyze the first 5 seconds."
+                )
+
+            else:
+                uploaded_audio = st.file_uploader(
+                    "Upload heart or lung audio",
+                    type=["wav", "mp3", "flac", "ogg"],
+                    key="uploaded_audio_file",
+                    help="WAV is recommended. Upload a recording of at least 8 seconds for the quality check.",
+                )
+
+                if uploaded_audio is not None:
+                    selected_audio_bytes = uploaded_audio.getvalue()
+                    selected_audio_name = uploaded_audio.name
+                    audio_suffix = Path(selected_audio_name).suffix.lower()
+                    audio_mime = {
+                        ".wav": "audio/wav",
+                        ".mp3": "audio/mpeg",
+                        ".flac": "audio/flac",
+                        ".ogg": "audio/ogg",
+                    }.get(audio_suffix, "audio/wav")
+                    st.audio(selected_audio_bytes, format=audio_mime)
+                    run_clicked = st.button(
+                        "Run AI Screening",
+                        type="primary",
+                        use_container_width=True,
+                        key="analyze_uploaded_audio",
+                    )
+
+                st.caption(
+                    "WAV is recommended. The technical quality check is applied to "
+                    "uploaded recordings too. The model analyzes the first 5 seconds."
+                )
+
+            html_block(
+                """
+                <div class="tips-card">
+                    <strong>Recording tips</strong>
+                    <ul>
+                        <li>Use a quiet room and reduce background conversation.</li>
+                        <li>Keep the microphone or stethoscope steady against the intended location.</li>
+                        <li>Capture around 10 seconds; the current model uses the first 5 seconds.</li>
+                    </ul>
+                </div>
+                """
+            )
+
+            # Clear stale results whenever the selected audio, modality, or source changes.
+            if selected_audio_bytes is not None:
+                audio_identity = hashlib.sha256(
+                    selected_audio_bytes
+                    + screening_type.encode("utf-8")
+                    + audio_source.encode("utf-8")
+                    + selected_audio_name.encode("utf-8")
+                ).hexdigest()
+                if st.session_state.get("active_audio_identity") != audio_identity:
+                    st.session_state.active_audio_identity = audio_identity
                     st.session_state.analysis = None
-                    q_fail = quality
-                else:
-                    mkey = "heart" if organ == "Heart" else "lung"
-                    if mkey not in models:
+                    # Do not carry one patient's questionnaire answers to a new audio sample.
+                    for history_key in (
+                        "heart_history_age",
+                        "heart_history_conditions",
+                        "heart_family_history",
+                        "heart_tobacco_history",
+                        "heart_history_symptoms",
+                        "heart_history_urgent",
+                        "lung_history_age",
+                        "lung_history_conditions",
+                        "lung_history_exposures",
+                        "lung_history_symptoms",
+                        "lung_history_urgent",
+                    ):
+                        st.session_state.pop(history_key, None)
+            else:
+                st.session_state.active_audio_identity = None
+                st.session_state.analysis = None
+
+    with right_col:
+        analysis = st.session_state.get("analysis")
+
+        if selected_audio_bytes is None and analysis is None:
+            html_block(
+                """
+                <div class="placeholder-card">
+                    <h3 style="margin-top:0;">Ready for Auscultation</h3>
+                    <p style="opacity:0.75;">
+                        Choose an organ, record or upload a sound sample, then review the
+                        model output and audio features.
+                    </p>
+                    <div class="landing-grid">
+                        <div><strong>01</strong><br>Choose heart or lungs</div>
+                        <div><strong>02</strong><br>Record or upload audio</div>
+                        <div><strong>03</strong><br>Review screening results</div>
+                    </div>
+                    <p class="landing-note">
+                        Results include normal/abnormal model outputs, a recording-quality
+                        check, and waveform / Mel-spectrogram inspection. Lung subtype output
+                        is shown when the binary lung model predicts abnormal.
+                    </p>
+                </div>
+                """
+            )
+
+        elif run_clicked and selected_audio_bytes is not None:
+            try:
+                with st.spinner("Analyzing..."):
+                    audio_bytes = selected_audio_bytes
+                    audio_suffix = Path(selected_audio_name).suffix.lower() or ".wav"
+                    audio, duration = load_audio_bytes(audio_bytes, suffix=audio_suffix)
+                    quality = assess_audio_quality(audio, duration)
+
+                    if not quality["acceptable"]:
                         st.session_state.analysis = None
-                        st.error(f"{organ} model missing in `models/`.")
-                    else:
-                        model_audio, _, X = build_model_input(audio)
-                        label, conf, norm_p, abn_p = predict_binary(models[mkey], X)
-                        l_type, l_conf, l_probs = (
-                            predict_lung_type(X)
-                            if organ == "Lungs" and label == "ABNORMAL" and "lung_type" in models and "lung_labels" in models
-                            else (None, None, None)
+
+                        html_block(
+                            f"""
+                            <div class="quality-fail">
+                                <strong>✗ Recording quality: NOT ACCEPTABLE</strong><br>
+                                Technical quality score: {quality["score"]}/100
+                            </div>
+                            """
                         )
-                        st.session_state.analysis = {
-                            "screening_type": organ,
-                            "input_mode": input_mode,
-                            "clip_name": clip_name,
-                            "quality": quality,
-                            "audio": audio,
-                            "model_audio": model_audio,
-                            "label": label,
-                            "confidence": conf,
-                            "normal_p": norm_p,
-                            "abnormal_p": abn_p,
-                            "lung_type": l_type,
-                            "lung_type_conf": l_conf,
-                            "lung_type_probs": l_probs,
-                        }
-        except Exception as exc:
-            st.session_state.analysis = None
-            st.error("Unable to process audio.")
-            st.exception(exc)
 
-    analysis = st.session_state.analysis
+                        st.markdown("#### Why the recording was rejected")
 
-    if q_fail is not None:
-        st.markdown(
-            f'<div class="q-fail"><strong>Recording rejected ({q_fail["score"]}/100)</strong> — '
-            f'{" ".join(html.escape(r) for r in q_fail["reasons"])}</div>',
-            unsafe_allow_html=True,
+                        for reason in quality["reasons"]:
+                            st.write(f"• {reason}")
+
+                        st.warning(
+                            "Record again with the microphone/stethoscope positioned "
+                            "correctly and with minimal background noise."
+                        )
+                        st.stop()
+
+                    model_audio, mel_db, X = build_model_input(audio)
+
+                    model_key = "heart" if screening_type == "Heart" else "lung"
+
+                    if model_key not in models:
+                        st.error(
+                            f"{screening_type} screening model is missing from `models/`."
+                        )
+                        st.stop()
+
+                    label, confidence, normal_p, abnormal_p = predict_binary(
+                        models[model_key],
+                        X,
+                    )
+
+                    lung_type = None
+                    lung_type_conf = None
+                    lung_type_probs = None
+
+                    if (
+                        screening_type == "Lungs"
+                        and label == "ABNORMAL"
+                        and "lung_type" in models
+                        and "lung_labels" in models
+                    ):
+                        lung_type, lung_type_conf, lung_type_probs = predict_lung_type(X)
+
+                    st.session_state.analysis = {
+                        "screening_type": screening_type,
+                        "audio_name": selected_audio_name,
+                        "audio_source": audio_source,
+                        "duration": duration,
+                        "quality": quality,
+                        "audio": audio,
+                        "model_audio": model_audio,
+                        "mel_db": mel_db,
+                        "label": label,
+                        "confidence": confidence,
+                        "normal_p": normal_p,
+                        "abnormal_p": abnormal_p,
+                        "lung_type": lung_type,
+                        "lung_type_conf": lung_type_conf,
+                        "lung_type_probs": lung_type_probs,
+                    }
+
+                    st.session_state.analysis_id = st.session_state.active_audio_identity
+
+                st.rerun()
+
+            except Exception as exc:
+                st.error("Could not process this audio recording.")
+                st.exception(exc)
+
+        elif selected_audio_bytes is not None and not run_clicked and analysis is None:
+            html_block(
+                """
+                <div class="placeholder-card">
+                    <h3 style="margin-top:0;">Audio Ready</h3>
+                    <p style="opacity:0.75; margin-bottom:0;">
+                        Click the screening button to check the recording quality,
+                        run the selected model, and inspect the audio features.
+                    </p>
+                </div>
+                """
+            )
+
+        elif analysis is not None:
+            # ----------------------------------------------------
+            # RESULTS
+            # ----------------------------------------------------
+            duration = analysis["duration"]
+            quality = analysis["quality"]
+            label = analysis["label"]
+            confidence = analysis["confidence"]
+            normal_p = analysis["normal_p"]
+            abnormal_p = analysis["abnormal_p"]
+
+            st.markdown("### AUSCULTATION ANALYSIS")
+            st.write(
+                f"**Audio:** {analysis.get('audio_name', 'recording.wav')}  \n"
+                f"**Duration:** {duration:.1f} seconds  \n"
+                f"**Input:** {analysis.get('audio_source', 'Audio')}  \n"
+                f"**Type:** {analysis['screening_type']}"
+            )
+
+            html_block(
+                f"""
+                <div class="quality-pass">
+                    <strong>✓ Recording quality: ACCEPTABLE</strong><br>
+                    Technical quality score: {quality["score"]}/100
+                </div>
+                """
+            )
+
+            st.markdown("")
+
+            render_screening_result(
+                organ_name=analysis["screening_type"],
+                label=label,
+                confidence=confidence,
+                normal_p=normal_p,
+                abnormal_p=abnormal_p,
+            )
+
+            if analysis["screening_type"] == "Lungs" and label == "ABNORMAL":
+                st.markdown("---")
+                st.markdown("#### Abnormal Sound Classification")
+
+                if analysis["lung_type"] is not None:
+                    st.info(
+                        f"Primary detected pattern: **"
+                        f"{format_label(analysis['lung_type'])}** "
+                        f"({analysis['lung_type_conf'] * 100:.1f}% confidence)"
+                    )
+
+                    labels = models["lung_labels"]
+                    probs = analysis["lung_type_probs"]
+
+                    ranked = sorted(
+                        zip(labels, probs),
+                        key=lambda item: float(item[1]),
+                        reverse=True,
+                    )
+
+                    for name, prob in ranked:
+                        clamped = min(max(float(prob), 0.0), 1.0)
+                        st.progress(
+                            clamped,
+                            text=f"{format_label(name)} — {clamped * 100:.1f}%",
+                        )
+
+            # ----------------------------------------------------
+            # AUDIO + SPECTRAL INSPECTION
+            # ----------------------------------------------------
+            with st.container(border=True):
+                st.markdown("#### Audio & Spectral Inspection")
+
+                tab_spec, tab_wave = st.tabs(
+                    ["Mel Spectrogram", "Waveform"]
+                )
+
+                with tab_spec:
+                    fig_spec = render_spectrogram_figure(analysis["mel_db"])
+                    st.pyplot(fig_spec)
+                    plt.close(fig_spec)
+
+                    st.caption(
+                        "This 64-band log-Mel spectrogram is the same 5-second "
+                        "model input representation used for inference."
+                    )
+
+                with tab_wave:
+                    fig_wave = render_waveform_figure(analysis["audio"])
+                    st.pyplot(fig_wave)
+                    plt.close(fig_wave)
+
+            # ----------------------------------------------------
+            # ORGAN-SPECIFIC HISTORY WHEN THE MODEL IS UNCERTAIN
+            # ----------------------------------------------------
+            probability_gap = abs(normal_p - abnormal_p) * 100.0
+
+            if probability_gap <= 10.0:
+                render_patient_history_and_recommendation(
+                    analysis["screening_type"],
+                    normal_p,
+                    abnormal_p,
+                )
+            elif label == "ABNORMAL":
+                st.markdown("---")
+                st.markdown("### Next Step")
+                st.warning(
+                    "The screening model detected an abnormal sound pattern. "
+                    "Arrange review with a qualified healthcare professional. "
+                    "This model result is not a diagnosis."
+                )
+                st.caption(
+                    "Seek care based on symptoms or concerns even if the model "
+                    "probabilities are not close. Urgent symptoms need urgent care."
+                )
+            else:
+                st.markdown("---")
+                st.caption(
+                    "The model probabilities differ by more than 10 percentage "
+                    "points, so the additional history questionnaire is not shown. "
+                    "A NORMAL screening result does not rule out disease. Seek "
+                    "medical advice for persistent, worsening, or concerning symptoms."
+                )
+
+
+    # ============================================================
+    # FOOTER
+    # ============================================================
+
+    st.markdown("---")
+    st.caption(
+        "StethoEdge • TensorFlow/Keras Prototype • Not Clinically Validated"
+    )
+
+elif selected_page == "How to use":
+    html_block(
+        """
+        <div class="hero-card">
+            <div class="hero-badge">User guide</div>
+            <h1 class="hero-title">How to use StethoEdge</h1>
+            <p class="hero-subtitle">A short guide to recording, screening and reading the prototype output.</p>
+        </div>
+        """
+    )
+
+    st.markdown("### Screening workflow")
+    guide_cols = st.columns(4)
+    guide_items = [
+        ("01 · Select", "Choose Heart or Lungs on the Screening page."),
+        ("02 · Capture", "Use Live recording or upload a WAV, MP3, FLAC or OGG file."),
+        ("03 · Check", "Run the technical audio-quality check and model inference."),
+        ("04 · Review", "Read the probabilities, subtype output (for abnormal lung results), waveform and Mel spectrogram."),
+    ]
+    for col, (heading, body) in zip(guide_cols, guide_items):
+        with col:
+            with st.container(border=True):
+                st.markdown(f"**{heading}**")
+                st.write(body)
+
+    st.markdown("### Recording and placement tips")
+    tips_left, tips_right = st.columns(2)
+    with tips_left:
+        with st.container(border=True):
+            st.markdown("**Before recording**")
+            st.write(
+                "Use a quiet room, keep the phone or microphone stable, and avoid "
+                "handling noise. Select the correct organ before recording."
+            )
+    with tips_right:
+        with st.container(border=True):
+            st.markdown("**During recording**")
+            st.write(
+                "Aim for approximately 10 seconds. Place the stethoscope or microphone "
+                "over the intended listening point and avoid rubbing or moving it."
+            )
+
+    st.markdown("### Understanding the result")
+    st.write(
+        "The binary model returns Normal and Abnormal probabilities. The displayed "
+        "label is whichever output is larger; these probabilities are model outputs, "
+        "not measured disease probabilities. The current model input is the first "
+        "5 seconds resampled to 16 kHz mono and converted to a 64-band log-Mel "
+        "spectrogram."
+    )
+    st.write(
+        "When the absolute difference between Normal and Abnormal probabilities is "
+        "10 percentage points or less, the app asks organ-specific history questions. "
+        "The resulting 0–100 context score is an experimental rule-based aid, not a "
+        "validated medical risk score. Urgent warning symptoms override the score."
+    )
+    st.warning(
+        "A NORMAL result does not rule out disease. An ABNORMAL result is not a "
+        "diagnosis. Do not delay medical care because of an app result."
+    )
+
+    st.markdown("### Frequently asked questions")
+    with st.expander("Why was my recording rejected?"):
+        st.write(
+            "The technical gate checks duration, signal level, silence and clipping. "
+            "The current app expects at least 8 seconds for this quality check. "
+            "Record again in a quieter environment with the microphone positioned steadily."
         )
-    elif analysis is not None:
-        render_verdict_card(analysis)
-        tab_guide, tab_spec = st.tabs(["Clinical Guide", "Audio & Spectrum"])
-        with tab_guide:
-            render_trainee_guide(analysis)
-        with tab_spec:
-            c1, c2 = st.columns(2, gap="medium")
-            with c1:
-                fig_s = render_spectrogram_figure(analysis["model_audio"])
-                st.pyplot(fig_s)
-                plt.close(fig_s)
-            with c2:
-                fig_w = render_waveform_figure(analysis["audio"])
-                st.pyplot(fig_w)
-                plt.close(fig_w)
-    else:
-        st.markdown(
-            '<div class="calm-empty">Select <strong>Heart</strong> or <strong>Lungs</strong> and add a recording on the left to begin.</div>',
-            unsafe_allow_html=True,
+    with st.expander("What if my microphone does not record?"):
+        st.write(
+            "Allow microphone access in your browser, check the operating-system input "
+            "device, and reload the page. You can also use Upload audio file."
         )
+    with st.expander("Are uploaded recordings saved permanently by this code?"):
+        st.write(
+            "This app code does not write uploaded recordings to a patient database. "
+            "Audio is held during the app session and briefly written to a temporary "
+            "file for decoding, which is removed after loading. Hosting infrastructure "
+            "and browser behaviour are separate from this application code."
+        )
+    with st.expander("Why does the app only analyse 5 seconds?"):
+        st.write(
+            "The saved Keras models were trained with 5-second inputs. Changing the "
+            "window length requires matching training and inference preprocessing and "
+            "would require retraining the models."
+        )
+
+else:
+    html_block(
+        """
+        <div class="hero-card">
+            <div class="hero-badge">Project overview</div>
+            <h1 class="hero-title">About StethoEdge</h1>
+            <p class="hero-subtitle">An experimental AI-assisted heart and lung auscultation screening prototype.</p>
+        </div>
+        """
+    )
+
+    about_left, about_right = st.columns([1.15, 0.85], gap="large")
+    with about_left:
+        st.markdown("### What the project does")
+        st.write(
+            "StethoEdge accepts heart or lung audio, checks basic technical recording "
+            "quality, converts the first five seconds into a log-Mel spectrogram, and "
+            "runs the corresponding TensorFlow/Keras binary classifier. If the lung "
+            "binary classifier returns ABNORMAL, a separate model estimates the "
+            "abnormal sound subtype using the saved subtype-label file."
+        )
+        st.markdown("### Processing pipeline")
+        pipeline = [
+            "Live recording or audio-file upload",
+            "Decode to mono audio at 16 kHz",
+            "Technical duration / level / silence / clipping checks",
+            "First 5 seconds → 64-band log-Mel spectrogram",
+            "Heart or lung normal/abnormal model inference",
+            "Lung subtype inference when the lung result is abnormal",
+            "Organ-specific history form when probability gap ≤ 10 percentage points",
+        ]
+        for step in pipeline:
+            st.markdown(f"- {step}")
+
+        st.markdown("### Data and interpretation")
+        st.write(
+            "The project uses public heart-sound and respiratory-sound resources, "
+            "including PhysioNet heart-sound material and ICBHI respiratory recordings, "
+            "alongside the project's curated training folders. The current ICBHI lung "
+            "binary import rule is based on crackle/wheeze annotations overlapping the "
+            "first five seconds. That acoustic-event label is not the same as a patient "
+            "diagnosis or a complete assessment of lung health."
+        )
+
+    with about_right:
+        with st.container(border=True):
+            st.markdown("### Model status")
+            render_model_registry()
+            if "lung_labels" in models:
+                st.markdown("**Lung subtype labels**")
+                for label_name in models["lung_labels"]:
+                    st.write(f"• {format_label(str(label_name))}")
+
+            st.markdown("---")
+            st.markdown("### Technology")
+            st.write("Python · Streamlit · TensorFlow/Keras · Librosa · NumPy · Matplotlib")
+
+    st.markdown("### Limitations")
+    limitation_cols = st.columns(3)
+    limits = [
+        ("Not a diagnosis", "The prototype is not clinically validated and cannot replace a clinician."),
+        ("Dataset limits", "Dataset labels, recording devices, patient overlap and class coverage affect model performance."),
+        ("History score", "The questionnaire score is an experimental rule-based context score, not a clinical risk prediction."),
+    ]
+    for col, (heading, body) in zip(limitation_cols, limits):
+        with col:
+            with st.container(border=True):
+                st.markdown(f"**{heading}**")
+                st.write(body)
+
+    if TEAM_NAME or TEAM_MEMBERS or PROJECT_URL:
+        st.markdown("### Team")
+        if TEAM_NAME:
+            st.write(f"**Team:** {TEAM_NAME}")
+        if TEAM_MEMBERS:
+            st.write("**Members:** " + ", ".join(TEAM_MEMBERS))
+        if PROJECT_URL:
+            st.link_button("Project link", PROJECT_URL)

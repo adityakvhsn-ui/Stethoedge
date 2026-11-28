@@ -23,3 +23,4 @@ __pycache__/
 /train_lung_model_augmented.py
 /demo_backup.py
 /lung_abnormal_type_backup.keras
+/stethoedge_final_demo_bundle/
