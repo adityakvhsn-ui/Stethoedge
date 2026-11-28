@@ -337,19 +337,30 @@ print(
 # CLASS WEIGHTS
 # ============================================================
 
+# ============================================================
+# CLASS WEIGHTS - MODERATED BALANCING
+# ============================================================
+
 classes = np.unique(y_train)
 
-weights = compute_class_weight(
+raw_weights = compute_class_weight(
     class_weight="balanced",
     classes=classes,
     y=y_train
 )
 
-class_weights = dict(
-    zip(classes, weights)
-)
+# Reduce the strength of class balancing using square root.
+# This prevents the minority abnormal class from receiving
+# excessively high influence.
 
-print("\nClass weights:")
+min_weight = np.min(raw_weights)
+
+class_weights = {
+    int(cls): float(np.sqrt(weight / min_weight))
+    for cls, weight in zip(classes, raw_weights)
+}
+
+print("\nModerated class weights:")
 print(class_weights)
 
 

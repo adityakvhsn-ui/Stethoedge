@@ -44,6 +44,10 @@ EPOCHS = 30
 
 SEED = 42
 
+# False = only retrain the normal/abnormal model.
+# True = also retrain the abnormal subtype model.
+TRAIN_SUBTYPE_MODEL = False
+
 random.seed(SEED)
 np.random.seed(SEED)
 tf.random.set_seed(SEED)
@@ -250,11 +254,13 @@ def train_binary_model():
     )
 
     if len(normal_files) == 0:
+
         raise RuntimeError(
             f"No normal recordings found in:\n{normal_dir}"
         )
 
     if len(abnormal_files) == 0:
+
         raise RuntimeError(
             f"No abnormal recordings found in:\n{abnormal_dir}"
         )
@@ -263,7 +269,7 @@ def train_binary_model():
     y = []
 
     # ----------------------------
-    # NORMAL
+    # NORMAL: CLASS INDEX 0
     # ----------------------------
 
     print("\nLoading normal recordings...")
@@ -280,7 +286,7 @@ def train_binary_model():
             y.append(0)
 
     # ----------------------------
-    # ABNORMAL
+    # ABNORMAL: CLASS INDEX 1
     # ----------------------------
 
     print("Loading abnormal recordings...")
@@ -318,6 +324,18 @@ def train_binary_model():
         np.sum(y == 1)
     )
 
+    if len(X) == 0:
+
+        raise RuntimeError(
+            "No usable lung recordings were loaded."
+        )
+
+    if len(np.unique(y)) != 2:
+
+        raise RuntimeError(
+            "Both normal and abnormal classes must contain usable recordings."
+        )
+
     # Add channel dimension
     X = X[..., np.newaxis]
 
@@ -350,22 +368,49 @@ def train_binary_model():
     )
 
     # ----------------------------
-    # CLASS WEIGHTS
+    # MODERATED CLASS WEIGHTS
     # ----------------------------
 
     classes = np.unique(y_train)
 
-    weights = compute_class_weight(
+    raw_weights = compute_class_weight(
         class_weight="balanced",
         classes=classes,
         y=y_train
     )
 
-    class_weights = dict(
-        zip(classes, weights)
-    )
+    # Square-root moderation reduces the relative
+    # influence of the minority class.
 
-    print("\nClass weights:")
+    # Class 0 = NORMAL
+    # Class 1 = ABNORMAL
+
+    min_weight = np.min(raw_weights)
+
+    class_weights = {
+
+        int(cls): float(
+            np.sqrt(weight / min_weight)
+        )
+
+        for cls, weight in zip(
+            classes,
+            raw_weights
+        )
+    }
+
+    print("\nOriginal balanced weights:")
+
+    print({
+        int(cls): float(weight)
+        for cls, weight in zip(
+            classes,
+            raw_weights
+        )
+    })
+
+    print("\nModerated class weights:")
+
     print(class_weights)
 
     # ----------------------------
@@ -380,6 +425,8 @@ def train_binary_model():
     print("\n========================================")
     print("LUNG NORMAL / ABNORMAL MODEL")
     print("========================================")
+
+    print("Class mapping: 0 = NORMAL, 1 = ABNORMAL")
 
     model.summary()
 
@@ -408,7 +455,7 @@ def train_binary_model():
     # ----------------------------
 
     print("\n========================================")
-    print("TRAINING")
+    print("TRAINING LUNG NORMAL / ABNORMAL MODEL")
     print("========================================")
 
     model.fit(
@@ -434,7 +481,7 @@ def train_binary_model():
     # ----------------------------
 
     print("\n========================================")
-    print("TEST RESULTS")
+    print("LUNG TEST RESULTS")
     print("========================================")
 
     loss, accuracy = model.evaluate(
@@ -467,24 +514,30 @@ def train_binary_model():
         classification_report(
             y_test,
             predicted_classes,
+            labels=[0, 1],
             target_names=[
                 "normal",
                 "abnormal"
-            ]
+            ],
+            zero_division=0
         )
     )
 
     print("\nConfusion Matrix:")
 
+    print("Rows = actual [normal, abnormal]")
+    print("Columns = predicted [normal, abnormal]")
+
     print(
         confusion_matrix(
             y_test,
-            predicted_classes
+            predicted_classes,
+            labels=[0, 1]
         )
     )
 
     # ----------------------------
-    # SAVE MODEL
+    # SAVE BINARY MODEL
     # ----------------------------
 
     model_path = os.path.join(
@@ -561,29 +614,12 @@ def train_subtype_model():
             "\nExpected structure:"
         )
 
-        print(
-            "abnormal/"
-        )
-
-        print(
-            "├── coarse_crackles/"
-        )
-
-        print(
-            "├── fine_crackles/"
-        )
-
-        print(
-            "├── pleural_rub/"
-        )
-
-        print(
-            "├── rhonchi/"
-        )
-
-        print(
-            "└── wheezing/"
-        )
+        print("abnormal/")
+        print("├── coarse_crackles/")
+        print("├── fine_crackles/")
+        print("├── pleural_rub/")
+        print("├── rhonchi/")
+        print("└── wheezing/")
 
         print(
             "\nThe Normal/Abnormal model was still trained successfully."
@@ -826,7 +862,7 @@ def train_subtype_model():
     )
 
     # ----------------------------
-    # SAVE MODEL
+    # SAVE SUBTYPE MODEL
     # ----------------------------
 
     model_path = os.path.join(
@@ -851,13 +887,8 @@ def train_subtype_model():
     print("ABNORMAL TYPE MODEL SAVED")
     print("========================================")
 
-    print(
-        model_path
-    )
-
-    print(
-        labels_path
-    )
+    print(model_path)
+    print(labels_path)
 
 
 # ============================================================
@@ -876,11 +907,21 @@ print(
     f"Lung data folder:\n{LUNG_DIR}"
 )
 
-# Stage 1
+# Stage 1: retrain the normal/abnormal lung model.
 train_binary_model()
 
-# Stage 2
-train_subtype_model()
+# Stage 2 is optional. Disabled by default to preserve
+# the existing subtype model and labels.
+if TRAIN_SUBTYPE_MODEL:
+
+    train_subtype_model()
+
+else:
+
+    print(
+        "\nSkipping subtype retraining; existing subtype "
+        "model and labels are preserved."
+    )
 
 print("\n========================================")
 print("LUNG TRAINING COMPLETE")

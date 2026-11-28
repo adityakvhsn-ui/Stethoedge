@@ -1,9 +1,25 @@
+# Python environment and cache
 .venv/
 __pycache__/
 *.pyc
-.env
-.streamlit/secrets.toml
 
-data/heart/
-data/stetho_data_Heart/
-data/verified_demo_lungs/
+# Local training datasets
+/data/heart/
+/data/stetho_data_Heart/
+/data/ICBHI_final_database_import/
+/data/verified_demo_lungs/
+
+# Model backups
+/lung_normal_abnormal_backup.keras
+/models/*_backup.keras
+/models/*_patient_split.keras
+/heart_normal_abnormal_backup.keras
+
+# Local reports
+/icbhi_import_report.csv
+
+# Local app backup
+/demo_backup.py/lung_abnormal_type_backup.keras
+/train_lung_model_augmented.py
+/demo_backup.py
+/lung_abnormal_type_backup.keras
